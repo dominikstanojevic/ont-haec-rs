@@ -44,7 +44,7 @@ RUN apt-get update \
 
 # Set environment variables
 ENV LIBTORCH=/libs
-ENV LD_LIBRARY_PATH=${LIBTORCH}/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=${LIBTORCH}/lib:$LD_LIBRARY_PATH:/usr/local/cuda/compat
 
 # Labels
 LABEL Author="Dominik Stanojevic"
