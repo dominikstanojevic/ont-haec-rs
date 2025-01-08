@@ -3,7 +3,7 @@ FROM nvidia/cuda:11.7.1-cudnn8-runtime-ubuntu22.04 as devel
 
 # Install essential packages
 RUN apt-get update \
-    && apt-get install -y wget git unzip curl build-essential zlib1g-dev zstd \
+    && apt-get install -y wget git unzip curl build-essential zlib1g-dev zstd libarchive-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Build minimap2
@@ -15,10 +15,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     && export PATH="/root/.cargo/bin:${PATH}"
 
 # Get libtorch
-RUN wget -q -O libtorch.zip https://download.pytorch.org/libtorch/cu117/libtorch-cxx11-abi-shared-with-deps-2.0.1%2Bcu117.zip \
-    && unzip -q libtorch.zip && rm libtorch.zip \
-    && export LIBTORCH=/libtorch \
-    && export LD_LIBRARY_PATH=${LIBTORCH}/lib:$LD_LIBRARY_PATH
+RUN wget -q -O- https://download.pytorch.org/libtorch/cu117/libtorch-cxx11-abi-shared-with-deps-2.0.1%2Bcu117.zip |bsdtar -xf- -C / 
 
 # Build herro
 # Copy files from host to container
@@ -45,7 +42,7 @@ RUN apt-get update \
 
 # Set environment variables
 ENV LIBTORCH=/libs
-ENV LD_LIBRARY_PATH=${LIBTORCH}/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=${LIBTORCH}/lib:$LD_LIBRARY_PATH:/usr/local/cuda/compat
 
 # Labels
 LABEL Author="Dominik Stanojevic"
