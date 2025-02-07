@@ -71,17 +71,16 @@ impl InferenceData {
 }
 
 fn collate<'a>(batch: &[(u32, &ConsensusWindow)]) -> InferenceBatch {
-    // Get longest sequence
-    let length = batch
-        .iter()
-        .map(|(_, f)| f.bases.len_of(Axis(0)))
-        .max()
-        .unwrap();
+    const KERNEL_SIZE: usize = 17;
+    const KERNEL_RADIUS: usize = KERNEL_SIZE / 2;
+
+    let total_candidates: usize = batch.iter().map(|(_, f)| f.supported.len()).sum();
+
     let size = [
-        batch.len() as i64,
-        length as i64,
+        total_candidates as i64,
+        KERNEL_SIZE as i64,
         batch[0].1.bases.len_of(Axis(1)) as i64,
-    ]; // [B, L, R]
+    ]; // [N, K, R]
 
     let bases = Tensor::full(
         &size,
@@ -89,78 +88,100 @@ fn collate<'a>(batch: &[(u32, &ConsensusWindow)]) -> InferenceBatch {
         (tch::Kind::Uint8, tch::Device::Cpu),
     );
 
-    //let quals = Tensor::ones(&size, (tch::Kind::Uint8, tch::Device::Cpu));
     let quals = Tensor::full(
         &size,
         QUAL_MAX_VAL as i64,
         (tch::Kind::Uint8, tch::Device::Cpu),
     );
+    //let quals = Tensor::zeros_like(&bases);
 
     let mut lens = Vec::with_capacity(batch.len());
     let mut indices = Vec::with_capacity(batch.len());
     let mut wids = Vec::with_capacity(batch.len());
 
-    for (idx, (wid, f)) in batch.iter().enumerate() {
+    let mut current_candidate = 0;
+
+    for (_idx, (wid, f)) in batch.iter().enumerate() {
         wids.push(*wid);
         let l = f.bases.len_of(Axis(0));
 
-        let bt = unsafe {
-            let shape: Vec<_> = f.bases.shape().iter().map(|s| *s as i64).collect();
-            Tensor::from_blob(
-                f.bases.as_ptr(),
-                &shape,
-                &[shape[shape.len() - 1], 1],
-                tch::Kind::Uint8,
-                tch::Device::Cpu,
-            )
-        };
+        let supported: Vec<_> = f
+            .supported
+            .iter()
+            .map(|&sp| (f.indices[sp.pos as usize] + sp.ins as usize))
+            .collect();
 
-        let qt = unsafe {
-            let shape: Vec<_> = f.quals.shape().iter().map(|s| *s as i64).collect();
-            Tensor::from_blob(
-                f.quals.as_ptr() as *const u8,
-                &shape,
-                &[shape[shape.len() - 1], 1],
-                tch::Kind::Uint8,
-                tch::Device::Cpu,
-            )
-        };
+        let mut candidate_indices = Vec::with_capacity(supported.len());
 
-        bases.i((idx as i64, ..l as i64, ..)).copy_(&bt);
-        quals.i((idx as i64, ..l as i64, ..)).copy_(&qt);
+        for &pos in &supported {
+            let start = pos.saturating_sub(KERNEL_RADIUS);
+            let end = (pos + KERNEL_RADIUS + 1).min(l);
+            let pad_left = KERNEL_RADIUS.saturating_sub(pos);
+            let pad_right = KERNEL_RADIUS.saturating_sub(l - pos);
 
-        /*for p in 0..l {
-            for r in 0..f.bases.len_of(Axis(1)) {
-                let _ = bases
-                    .i((idx as i64, p as i64, r as i64))
-                    .fill_(f.bases[[p, r]] as i64);
+            let mut bases_window =
+                Array2::from_elem((KERNEL_SIZE, f.bases.len_of(Axis(1))), BASE_PADDING);
 
-                let _ = quals
-                    .i((idx as i64, p as i64, r as i64))
-                    .fill_(f.quals[[p, r]] as f64);
-            }
-        }*/
+            let mut quals_window =
+                Array2::from_elem((KERNEL_SIZE, f.quals.len_of(Axis(1))), QUAL_MAX_VAL as u8);
+            quals_window.slice_mut(s![..KERNEL_RADIUS, ..]).fill(0u8);
 
-        //println!("Bases shape: {:?}", f.bases.shape());
-        //println!("Quals shape: {:?}", f.quals.shape());
+            let data_start = KERNEL_RADIUS.saturating_sub(pos);
+            let data_len = end - start;
+            bases_window
+                .slice_mut(s![data_start..data_start + data_len, ..])
+                .assign(&f.bases.slice(s![start..end, ..]));
+            quals_window
+                .slice_mut(s![data_start..data_start + data_len, ..])
+                .assign(&f.quals.slice(s![start..end, ..]));
+
+            let bt = unsafe {
+                let shape: Vec<_> = vec![KERNEL_SIZE as i64, f.bases.len_of(Axis(1)) as i64];
+                Tensor::from_blob(
+                    bases_window.as_ptr() as *const u8,
+                    &shape,
+                    &[shape[shape.len() - 1], 1],
+                    tch::Kind::Uint8,
+                    tch::Device::Cpu,
+                )
+            };
+
+            let qt = unsafe {
+                let shape: Vec<_> = vec![KERNEL_SIZE as i64, f.quals.len_of(Axis(1)) as i64];
+                Tensor::from_blob(
+                    quals_window.as_ptr() as *const u8,
+                    &shape,
+                    &[shape[shape.len() - 1], 1],
+                    tch::Kind::Uint8,
+                    tch::Device::Cpu,
+                )
+            };
+
+            bases
+                .i((current_candidate as i64, .., ..))
+                .copy_(&bt.squeeze());
+            quals
+                .i((current_candidate as i64, .., ..))
+                .copy_(&qt.squeeze());
+
+            candidate_indices.push(current_candidate);
+            current_candidate += 1;
+        }
 
         lens.push(f.supported.len() as i32);
 
-        let tidx: Vec<_> = f
-            .supported
-            .iter()
-            .map(|&sp| (f.indices[sp.pos as usize] + sp.ins as usize) as i32)
-            .collect();
-        indices.push(Tensor::try_from(tidx).unwrap());
+        indices.push(Tensor::try_from(candidate_indices).unwrap());
     }
 
-    /*if batch[0].1.supported.contains(&SupportedPos::new(837, 0))
-        && batch[0].1.supported.contains(&SupportedPos::new(1157, 0))
-    {
-        bases.save("bases_to_test.tmp2.pt").unwrap();
-        quals.save("quals_to_test.tmp2.pt").unwrap();
-        indices[0].save("indices_to_test.tmp2.pt").unwrap();
-    }*/
+    for (_, example) in batch {
+        if example.rid == 14987 && example.wid == 0 {
+            bases.save("bases.pt").unwrap();
+            quals.save("quals.pt").unwrap();
+            Tensor::try_from(&lens).unwrap().save("lens.pt").unwrap();
+
+            println!("Saved tensors.");
+        }
+    }
 
     InferenceBatch::new(wids, bases, quals, Tensor::try_from(lens).unwrap(), indices)
 }
@@ -170,14 +191,16 @@ fn inference(
     model: &CModule,
     device: tch::Device,
 ) -> (Vec<u32>, Vec<Tensor>, Vec<Tensor>) {
+    let quals_mask = batch.quals.eq(0).to(device);
     let quals = batch.quals.to_device_(device, tch::Kind::Float, true, true);
-    let quals = QUAL_SCALE * quals - QUAL_OFFSET;
+    let quals = quals.where_self(&quals_mask, &(QUAL_SCALE * &quals - QUAL_OFFSET));
+
+    //let quals = QUAL_SCALE * quals - QUAL_OFFSET;
 
     let inputs = [
         IValue::Tensor(batch.bases.to_device_(device, tch::Kind::Int, true, true)),
         IValue::Tensor(quals),
-        IValue::Tensor(batch.lens),
-        IValue::TensorList(batch.indices),
+        IValue::Tensor(batch.lens.to_device_(device, tch::Kind::Int, true, true)),
     ];
 
     let (info_logits, bases_logits) =
@@ -230,13 +253,6 @@ pub(crate) fn inference_worker<P: AsRef<Path>>(
                         .replace(Vec::try_from(bl).unwrap());
                 });
         }
-
-        /*println!(
-            "Device {}, in: {}, out: {}",
-            d,
-            input_channel.len(),
-            output_channel.len()
-        );*/
 
         output_channel.send(data.consensus_data).unwrap();
     }

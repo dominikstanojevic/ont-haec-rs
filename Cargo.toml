@@ -27,7 +27,7 @@ indicatif = "~0.17.2"
 ordered-float = "~4.2.0"
 ndarray = "~0.15.6"
 npyz = { version = "~0.8.1", features = ["derive"] }
-tch = "0.13.0"
+tch = "0.14.0"
 crossbeam-channel = "~0.5.8"
 rustc-hash = "~1.1.0"
 glob = "~0.3.1"
