@@ -1,4 +1,6 @@
-use std::path::Path;
+use std::io::prelude::*;
+use std::io::BufWriter;
+use std::{fs::File, path::Path};
 
 use crossbeam_channel::{Receiver, Sender};
 use itertools::Itertools;
@@ -173,16 +175,6 @@ fn collate<'a>(batch: &[(u32, &ConsensusWindow)]) -> InferenceBatch {
         indices.push(Tensor::try_from(candidate_indices).unwrap());
     }
 
-    for (_, example) in batch {
-        if example.rid == 14987 && example.wid == 0 {
-            bases.save("bases.pt").unwrap();
-            quals.save("quals.pt").unwrap();
-            Tensor::try_from(&lens).unwrap().save("lens.pt").unwrap();
-
-            println!("Saved tensors.");
-        }
-    }
-
     InferenceBatch::new(wids, bases, quals, Tensor::try_from(lens).unwrap(), indices)
 }
 
@@ -232,13 +224,19 @@ pub(crate) fn inference_worker<P: AsRef<Path>>(
     let mut model = tch::CModule::load_on_device(model_path, device).expect("Cannot load model.");
     model.set_eval();
 
+    //let mut logger = BufWriter::new(File::create("inference.log").unwrap());
+
     loop {
         let mut data = match input_channel.recv() {
             Ok(data) => data,
             Err(_) => break,
         };
 
-        for batch in data.batches {
+        for (bid, batch) in data.batches.into_iter().enumerate() {
+            /*logger
+            .write(format!("{},{}", bid, batch.bases.size()[0]).as_bytes())
+            .unwrap();*/
+
             let (wids, info_logits, bases_logits) = inference(batch, &model, device);
             wids.into_iter()
                 .zip(info_logits.into_iter())
@@ -254,6 +252,7 @@ pub(crate) fn inference_worker<P: AsRef<Path>>(
                 });
         }
 
+        //logger.flush();
         output_channel.send(data.consensus_data).unwrap();
     }
 }
@@ -325,7 +324,7 @@ pub(crate) struct WindowExample {
     n_alns: u8,
     bases: Array2<u8>,
     quals: Array2<u8>,
-    supported: Vec<SupportedPos>,
+    pub(crate) supported: Vec<SupportedPos>,
     n_total_wins: u16,
 }
 

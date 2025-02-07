@@ -253,7 +253,7 @@ pub(crate) fn consensus_worker(
                 }
             }
         }
-
-        //println!("Consensus device: {}, in {}", device, receiver.len());
     }
+
+    assert!(consensus_data.is_empty());
 }

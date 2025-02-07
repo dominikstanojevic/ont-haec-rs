@@ -485,7 +485,7 @@ pub(crate) fn extract_features<'a, T: FeaturesOutput<'a>>(
         );
     }
 
-    feats_output.emit();
+    feats_output.after_read_processing();
 }
 
 fn calculate_accuracy(window: &OverlapWindow, cigar: &[u8], tseq: &[u8], qseq: &[u8]) -> f32 {
@@ -721,7 +721,10 @@ pub(crate) trait FeaturesOutput<'a> {
         ids: Vec<&str>,
         n_wids: u16,
     );
-    fn emit(&mut self);
+
+    fn after_read_processing(&mut self);
+
+    fn finish(&mut self);
 }
 
 #[derive(Clone)]
@@ -775,17 +778,20 @@ where
         output_features(&output_path, wid, &ids, bases, quals, supported.into_iter()).unwrap();
     }
 
-    fn emit(&mut self) {
+    fn after_read_processing(&mut self) {
         self.pbar_sender.send(PBarNotification::Inc).unwrap();
 
         self.rname = None;
     }
+
+    fn finish(&mut self) {}
 }
 
 pub(crate) struct InferenceOutput {
     sender: Sender<InferenceData>,
     features: Vec<WindowExample>,
     batch_size: usize,
+    current_size: usize,
 }
 
 impl InferenceOutput {
@@ -794,6 +800,7 @@ impl InferenceOutput {
             sender,
             features: Vec::with_capacity(batch_size),
             batch_size: batch_size,
+            current_size: 0,
         }
     }
 }
@@ -815,6 +822,13 @@ impl<'a> FeaturesOutput<'a> for InferenceOutput {
         ids: Vec<&str>,
         n_wids: u16,
     ) {
+        if self.current_size + supported.len() > self.batch_size {
+            self.current_size = 0;
+            let data = prepare_examples(self.features.drain(..), self.batch_size);
+            self.sender.send(data).unwrap();
+        }
+
+        self.current_size += supported.len();
         self.features.push(WindowExample::new(
             rid,
             wid,
@@ -824,14 +838,11 @@ impl<'a> FeaturesOutput<'a> for InferenceOutput {
             supported,
             n_wids,
         ));
-
-        if self.features.len() == self.batch_size {
-            let data = prepare_examples(self.features.drain(..), self.batch_size);
-            self.sender.send(data).unwrap();
-        }
     }
 
-    fn emit(&mut self) {
+    fn after_read_processing(&mut self) {}
+
+    fn finish(&mut self) {
         let data = prepare_examples(self.features.drain(..), self.batch_size);
         self.sender.send(data).unwrap();
     }

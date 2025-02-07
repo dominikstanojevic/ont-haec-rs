@@ -21,7 +21,7 @@ use std::{
 
 use crate::{
     consensus::consensus_worker,
-    features::{FeatsGenOutput, InferenceOutput},
+    features::{FeatsGenOutput, FeaturesOutput, InferenceOutput},
     inference::inference_worker,
     overlaps::alignment_reader,
 };
@@ -151,7 +151,7 @@ pub fn error_correction<T, U, V>(
 
         for device in devices {
             let (infer_sender, infer_recv) = bounded(INFER_CHANNEL_CAP_FACTOR * threads);
-            let (cons_sender, cons_recv) = unbounded();
+            let (cons_sender, cons_recv) = bounded(50);
             let writer_s = writer_sender.clone();
 
             for _ in 0..threads {
@@ -181,6 +181,8 @@ pub fn error_correction<T, U, V>(
                             &mut feats_output,
                         );
                     }
+
+                    feats_output.finish();
                 });
             }
 
